@@ -41,7 +41,7 @@ export function normalize99Acres(payload: any): Partial<Lead> {
  */
 export function normalizeMagicBricks(payload: any): Partial<Lead> {
   return {
-    name: payload.name || payload.firstName + ' ' + payload.lastName || 'Unknown',
+    name: payload.name || (payload.firstName && payload.lastName ? `${payload.firstName} ${payload.lastName}` : 'Unknown'),
     phone: normalizePhone(payload.phone || payload.mobileNumber || payload.contact),
     email: payload.emailId || payload.email,
     source: 'magicbricks' as LeadSource,

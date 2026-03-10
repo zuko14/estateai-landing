@@ -15,7 +15,10 @@ describe('Lead Scorer', () => {
     status: 'New',
     createdAt: new Date(),
     updatedAt: new Date(),
-    tags: []
+    tags: [],
+    isDuplicate: false,
+    isOptedOut: false,
+    isDND: false,
   };
 
   describe('Score boundaries', () => {
@@ -31,7 +34,7 @@ describe('Lead Scorer', () => {
         budgetMin: 5000000,
         budgetMax: 10000000,
         investmentIntent: 'Investment',
-        tags: ['loan-approved', 'site-visited', 'ready-downpayment']
+        tags: ['loan-approved', 'site-visited', 'ready-downpayment'],
       };
 
       const result = scoreLead(perfectLead);
@@ -45,7 +48,7 @@ describe('Lead Scorer', () => {
         budgetMin: 10000000,
         budgetMax: 20000000,
         investmentIntent: 'Both',
-        tags: ['loan-approved', 'site-visited', 'ready-downpayment']
+        tags: ['loan-approved', 'site-visited', 'ready-downpayment'],
       };
 
       const result = scoreLead(overflowLead);
@@ -56,7 +59,7 @@ describe('Lead Scorer', () => {
       const negativeLead: Lead = {
         ...baseLead,
         timeline: 'Browsing',
-        tags: ['first-inquiry', 'no-research']
+        tags: ['first-inquiry', 'no-research'],
       };
 
       const result = scoreLead(negativeLead);
@@ -71,7 +74,7 @@ describe('Lead Scorer', () => {
         timeline: 'Immediate',
         budgetMin: 5000000,
         budgetMax: 10000000,
-        investmentIntent: 'Investment'
+        investmentIntent: 'Investment',
       };
 
       const result = scoreLead(hotLead);
@@ -84,7 +87,7 @@ describe('Lead Scorer', () => {
         timeline: '1-3 months',
         budgetMin: 3000000,
         budgetMax: 5000000,
-        investmentIntent: 'Self-use'
+        investmentIntent: 'Self-use',
       };
 
       const result = scoreLead(warmLead);
@@ -95,7 +98,7 @@ describe('Lead Scorer', () => {
       const coldLead: Lead = {
         ...baseLead,
         timeline: '6+ months',
-        tags: ['first-inquiry']
+        tags: ['first-inquiry'],
       };
 
       const result = scoreLead(coldLead);
@@ -215,7 +218,7 @@ describe('Lead Scorer', () => {
         investmentIntent: 20,
         urgencySignals: 20,
         total: 95,
-        classification: 'Hot' as const
+        classification: 'Hot' as const,
       };
 
       const factors = getScoreFactors(breakdown);

@@ -1,38 +1,43 @@
 import { Lead, ScoreBreakdown } from '../utils/lead.model';
+import { getScoringConfig } from '../../config/scoring.config';
 
 /**
  * Calculate lead score based on qualification criteria
+ * Uses configurable weights from scoring.config.ts
  */
 export function scoreLead(lead: Lead): ScoreBreakdown {
+  const config = getScoringConfig();
   let timeline = 0;
   let budgetClarity = 0;
   let investmentIntent = 0;
   let urgencySignals = 0;
 
-  // Timeline scoring
+  // Timeline scoring (using config weights)
   switch (lead.timeline) {
-    case 'Immediate':    timeline = 30;  break;
-    case '1-3 months':  timeline = 20;  break;
-    case '3-6 months':  timeline = 5;   break;
-    case '6+ months':   timeline = -10; break;
-    case 'Browsing':    timeline = -10; break;
+    case 'Immediate':    timeline = config.weights.timeline.immediate;   break;
+    case '1-3 months':  timeline = config.weights.timeline.shortTerm;   break;
+    case '3-6 months':  timeline = config.weights.timeline.mediumTerm;  break;
+    case '6+ months':   timeline = config.weights.timeline.longTerm;    break;
+    case 'Browsing':    timeline = config.weights.timeline.browsing;    break;
   }
 
   // Budget clarity scoring
   if (lead.budgetMin && lead.budgetMax) {
-    budgetClarity = lead.budgetMax >= 5000000 ? 25 : 15;
+    budgetClarity = lead.budgetMax >= 5000000
+      ? config.weights.budget.fullRange + config.weights.budget.highValueBonus
+      : config.weights.budget.fullRange;
   } else if (lead.budgetMin || lead.budgetMax) {
-    budgetClarity = 5;
+    budgetClarity = config.weights.budget.partialRange;
   } else {
-    budgetClarity = -15;
+    budgetClarity = config.weights.budget.none;
   }
 
   // Investment intent scoring
   switch (lead.investmentIntent) {
-    case 'Self-use':   investmentIntent = 20;  break;
-    case 'Investment': investmentIntent = 25;  break;
-    case 'Both':       investmentIntent = 25;  break;
-    case 'Unclear':    investmentIntent = -20; break;
+    case 'Self-use':   investmentIntent = config.weights.intent.selfUse;     break;
+    case 'Investment': investmentIntent = config.weights.intent.investment;  break;
+    case 'Both':       investmentIntent = config.weights.intent.both;        break;
+    case 'Unclear':    investmentIntent = config.weights.intent.unclear;     break;
   }
 
   // Urgency signals from tags
@@ -40,9 +45,9 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
   const coldTags = ['first-inquiry', 'no-research'];
 
   if (lead.tags.some(t => urgencyTags.includes(t))) {
-    urgencySignals = 20;
+    urgencySignals = config.weights.urgency.positiveSignals;
   } else if (lead.tags.some(t => coldTags.includes(t))) {
-    urgencySignals = -10;
+    urgencySignals = config.weights.urgency.negativeSignals;
   }
 
   // Calculate total score (clamp between 0-100)
@@ -50,14 +55,10 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
     timeline + budgetClarity + investmentIntent + urgencySignals
   ));
 
-  // Get thresholds from environment
-  const hotThreshold = Number(process.env.HOT_LEAD_THRESHOLD ?? 70);
-  const warmThreshold = Number(process.env.WARM_LEAD_THRESHOLD ?? 40);
-
-  // Classify lead
+  // Classify lead using config thresholds
   const classification: 'Hot' | 'Warm' | 'Cold' =
-    total >= hotThreshold ? 'Hot' :
-    total >= warmThreshold ? 'Warm' : 'Cold';
+    total >= config.thresholds.hot ? 'Hot' :
+    total >= config.thresholds.warm ? 'Warm' : 'Cold';
 
   return {
     timeline,
@@ -65,7 +66,7 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
     investmentIntent,
     urgencySignals,
     total,
-    classification
+    classification,
   };
 }
 

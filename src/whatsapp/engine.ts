@@ -4,15 +4,43 @@ import { classifyIntent } from '../qualification/intentClassifier';
 import { scoreLead } from '../qualification/scorer';
 import { handleHotLead } from '../qualification/hotLeadHandler';
 import { logger } from '../utils/logger';
-import { createClient } from '@supabase/supabase-js';
-import cron from 'node-cron';
-
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
+import { getSupabase } from '../utils/database';
+import { mapDbRowToLead } from '../utils/mappers';
+import { withRetry } from '../utils/retry';
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v18.0';
+
+/**
+ * Send WhatsApp message via Meta API
+ * This is the SINGLE canonical implementation — import this everywhere.
+ */
+export async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_API_TOKEN;
+
+  if (!phoneNumberId || !token) {
+    throw new Error('WhatsApp credentials not configured');
+  }
+
+  await withRetry(async () => {
+    await axios.post(
+      `${WHATSAPP_API_URL}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: to,
+        type: 'text',
+        text: { body: message },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+  }, `WhatsApp message to ${maskPhone(to)}`);
+}
 
 /**
  * Send initial qualification message within 2 minutes of lead capture
@@ -36,6 +64,8 @@ Reply to get personalized recommendations!`;
  * Process inbound reply from lead
  */
 export async function processInboundMessage(phone: string, message: string): Promise<void> {
+  const supabase = getSupabase();
+
   try {
     // Find lead by phone
     const { data: leads, error } = await supabase
@@ -51,7 +81,7 @@ export async function processInboundMessage(phone: string, message: string): Pro
       return;
     }
 
-    const lead = leads[0];
+    const lead = mapDbRowToLead(leads[0]);
 
     // Save message to database
     await supabase.from('messages').insert({
@@ -59,16 +89,16 @@ export async function processInboundMessage(phone: string, message: string): Pro
       direction: 'inbound',
       content: message,
       channel: 'whatsapp',
-      status: 'received'
+      status: 'received',
     });
 
     // Classify intent via Groq
     const intent = await classifyIntent(message);
 
     // Update lead with new information
-    const updates: any = {
+    const updates: Record<string, any> = {
       last_contacted_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     };
 
     if (intent.timeline) updates.timeline = intent.timeline;
@@ -78,27 +108,28 @@ export async function processInboundMessage(phone: string, message: string): Pro
     }
     if (intent.investmentIntent) updates.investment_intent = intent.investmentIntent;
     if (intent.urgencySignals?.length) {
-      updates.tags = [...(lead.tags || []), ...intent.urgencySignals];
+      updates.tags = [...new Set([...(lead.tags || []), ...intent.urgencySignals])];
     }
 
     await supabase.from('leads').update(updates).eq('id', lead.id);
 
     // Re-fetch lead for scoring
-    const { data: updatedLead } = await supabase.from('leads').select('*').eq('id', lead.id).single();
+    const { data: updatedRow } = await supabase.from('leads').select('*').eq('id', lead.id).single();
 
-    if (updatedLead) {
-      const scoreResult = scoreLead(updatedLead as Lead);
+    if (updatedRow) {
+      const updatedLead = mapDbRowToLead(updatedRow);
+      const scoreResult = scoreLead(updatedLead);
 
       // Update score and status
       await supabase.from('leads').update({
         score: scoreResult.total,
         status: scoreResult.classification === 'Hot' ? 'Hot' :
-                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold'
+                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', lead.id);
 
       // Handle Hot leads
       if (scoreResult.classification === 'Hot') {
-        await handleHotLead(updatedLead as Lead);
+        await handleHotLead(updatedLead);
       }
 
       // Handle Cold leads - start drip campaign
@@ -115,60 +146,50 @@ export async function processInboundMessage(phone: string, message: string): Pro
 }
 
 /**
- * Send WhatsApp message via Meta API
- */
-async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const token = process.env.WHATSAPP_API_TOKEN;
-
-  if (!phoneNumberId || !token) {
-    throw new Error('WhatsApp credentials not configured');
-  }
-
-  try {
-    await axios.post(
-      `${WHATSAPP_API_URL}/${phoneNumberId}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: to,
-        type: 'text',
-        text: { body: message }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-  } catch (error) {
-    logger.error('Failed to send WhatsApp message', { error, to: maskPhone(to) });
-    throw error;
-  }
-}
-
-/**
- * Schedule follow-up messages
+ * Schedule follow-up messages using the scheduled_messages table
  */
 export async function scheduleFollowUps(leadId: string): Promise<void> {
-  // 4 hours no reply → send brochure
+  const supabase = getSupabase();
+
+  // 4 hours no reply → send brochure reminder
+  const brochureTime = new Date(Date.now() + 4 * 60 * 60 * 1000);
   // 24 hours no reply → mark Cold + start drip
+  const dripTime = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-  const fourHoursLater = new Date(Date.now() + 4 * 60 * 60 * 1000);
-  const twentyFourHoursLater = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  try {
+    await supabase.from('scheduled_messages').insert([
+      {
+        lead_id: leadId,
+        scheduled_for: brochureTime.toISOString(),
+        message_type: 'brochure_followup',
+        content: 'Hi {name}, would you like a brochure for the properties in {location}? Reply YES and I\'ll send it right away!',
+        status: 'pending',
+      },
+      {
+        lead_id: leadId,
+        scheduled_for: dripTime.toISOString(),
+        message_type: 'cold_drip_start',
+        content: 'Hi {name}, just checking in about your {propertyType} search in {location}. Any updates on your timeline?',
+        status: 'pending',
+      },
+    ]);
 
-  logger.info('Follow-ups scheduled', {
-    leadId,
-    brochureAt: fourHoursLater,
-    dripAt: twentyFourHoursLater
-  });
+    logger.info('Follow-ups scheduled', {
+      leadId,
+      brochureAt: brochureTime,
+      dripAt: dripTime,
+    });
+  } catch (error) {
+    logger.error('Failed to schedule follow-ups', { error, leadId });
+  }
 }
 
 /**
  * Handle opt-out request
  */
 export async function handleOptOut(phone: string): Promise<void> {
+  const supabase = getSupabase();
+
   const { data: leads } = await supabase
     .from('leads')
     .select('id')
@@ -178,9 +199,16 @@ export async function handleOptOut(phone: string): Promise<void> {
     for (const lead of leads) {
       await supabase.from('leads').update({
         is_opted_out: true,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       }).eq('id', lead.id);
     }
+
+    // Cancel any pending scheduled messages
+    await supabase.from('scheduled_messages')
+      .update({ status: 'cancelled' })
+      .in('lead_id', leads.map(l => l.id))
+      .eq('status', 'pending');
+
     logger.info('Lead opted out', { phone: maskPhone(phone) });
   }
 }
@@ -196,9 +224,9 @@ export function containsOptOut(message: string): boolean {
 }
 
 /**
- * Mask phone number for logging
+ * Mask phone number for logging (compliance)
  */
-function maskPhone(phone: string): string {
-  if (phone.length < 8) return phone;
+export function maskPhone(phone: string): string {
+  if (phone.length < 8) return '****';
   return phone.slice(0, -8) + 'XXXX' + phone.slice(-4);
 }

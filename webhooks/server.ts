@@ -1,16 +1,21 @@
 import express, { Request, Response } from 'express';
 import rateLimit from 'express-rate-limit';
-import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
 import { normalizeLead } from '../src/capture/portalNormalizer';
-import { processInboundMessage, handleOptOut, containsOptOut } from '../src/whatsapp/engine';
+import { processInboundMessage, sendInitialMessage, handleOptOut, containsOptOut } from '../src/whatsapp/engine';
 import { scoreLead } from '../src/qualification/scorer';
 import { handleHotLead } from '../src/qualification/hotLeadHandler';
 import { appendLeadToSheet } from '../src/sheets/sheetsSync';
 import { startDripCampaign } from '../src/nurture/dripCampaign';
-import { handleInvalidPhone } from '../src/utils/edgeCases';
+import { handleInvalidPhone, checkDNDRegistry } from '../src/utils/edgeCases';
+import { mergeDuplicateLead } from '../src/utils/edgeCases';
 import { initializeDripCron } from '../src/nurture/dripCampaign';
 import { initializeAnalyticsCron } from '../src/analytics/metrics';
 import { logger } from '../src/utils/logger';
+import { getSupabase } from '../src/utils/database';
+import { mapDbRowToLead, mapLeadToDbRow } from '../src/utils/mappers';
+import { portalConfigs } from '../config/portals.config';
+import { LeadSource } from '../src/utils/lead.model';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,13 +27,25 @@ app.use(express.json());
 const limiter = rateLimit({
   windowMs: 60000,
   max: 200,
-  message: { error: 'Too many requests, please try again later' }
+  message: { error: 'Too many requests, please try again later' },
 });
 app.use(limiter);
 
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
+// Zod schema for basic webhook payload validation
+const webhookPayloadSchema = z.object({
+  name: z.string().optional(),
+  contactName: z.string().optional(),
+  firstName: z.string().optional(),
+  userName: z.string().optional(),
+  phone: z.string().optional(),
+  mobile: z.string().optional(),
+  mobileNumber: z.string().optional(),
+  contact: z.string().optional(),
+  contactNumber: z.string().optional(),
+  phoneNumber: z.string().optional(),
+}).passthrough().refine(
+  (data) => !!(data.phone || data.mobile || data.mobileNumber || data.contact || data.contactNumber || data.phoneNumber),
+  { message: 'At least one phone field is required' }
 );
 
 /**
@@ -42,17 +59,28 @@ async function handlePortalWebhook(
   try {
     logger.info(`Webhook received from ${source}`, { payload: req.body });
 
-    // Verify webhook secret
-    const secretHeader = req.headers['x-webhook-secret'];
-    const expectedSecret = process.env[`${source.toUpperCase()}_WEBHOOK_SECRET`];
+    // Verify webhook secret using portal config
+    const portalConfig = portalConfigs[source];
+    if (portalConfig) {
+      const secretHeader = req.headers['x-webhook-secret'];
+      const expectedSecret = process.env[portalConfig.secretEnvVar];
 
-    if (expectedSecret && secretHeader !== expectedSecret) {
-      res.status(401).json({ error: 'Unauthorized' });
+      if (expectedSecret && secretHeader !== expectedSecret) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+    }
+
+    // Validate payload with Zod
+    const validation = webhookPayloadSchema.safeParse(req.body);
+    if (!validation.success) {
+      logger.warn('Invalid webhook payload', { source, errors: validation.error.errors });
+      res.status(400).json({ error: 'Invalid payload', details: validation.error.errors });
       return;
     }
 
     // Normalize lead data
-    const leadData = normalizeLead(source as any, req.body);
+    const leadData = normalizeLead(source as LeadSource, req.body);
 
     // Validate phone number
     if (!leadData.phone || leadData.phone.length < 10) {
@@ -60,6 +88,16 @@ async function handlePortalWebhook(
       res.status(400).json({ error: 'Invalid phone number' });
       return;
     }
+
+    // Check DND registry before proceeding
+    const isDND = await checkDNDRegistry(leadData.phone);
+    if (isDND) {
+      logger.info('Lead is on DND registry, skipping WhatsApp', { phone: leadData.phone });
+      // Still store the lead, but mark as DND
+      leadData.isDND = true;
+    }
+
+    const supabase = getSupabase();
 
     // Check for duplicates
     const { data: existingLeads } = await supabase
@@ -72,66 +110,72 @@ async function handlePortalWebhook(
     let leadId: string;
 
     if (existingLeads && existingLeads.length > 0) {
-      // Update existing lead
-      const existing = existingLeads[0];
-      await supabase.from('leads').update({
-        ...leadData,
-        updated_at: new Date().toISOString()
-      }).eq('id', existing.id);
+      // Merge duplicate lead
+      const existing = mapDbRowToLead(existingLeads[0]);
+      await mergeDuplicateLead(existing, leadData);
       leadId = existing.id;
-      logger.info('Lead updated (duplicate)', { leadId });
+      logger.info('Lead merged (duplicate)', { leadId });
     } else {
       // Insert new lead
+      const dbRow = mapLeadToDbRow(leadData);
       const { data: newLead, error } = await supabase
         .from('leads')
         .insert({
-          ...leadData,
+          ...dbRow,
           status: 'New',
           score: 0,
           is_duplicate: false,
           is_opted_out: false,
-          is_dnd: false,
+          is_dnd: leadData.isDND || false,
           created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        logger.error('Failed to insert lead', { error });
+        throw error;
+      }
       leadId = newLead.id;
       logger.info('New lead created', { leadId });
     }
 
     // Fetch complete lead for scoring
-    const { data: lead } = await supabase.from('leads').select('*').eq('id', leadId).single();
+    const { data: leadRow } = await supabase.from('leads').select('*').eq('id', leadId).single();
 
-    if (lead) {
+    if (leadRow) {
+      const lead = mapDbRowToLead(leadRow);
+
       // Score the lead
-      const scoreResult = scoreLead(lead as any);
+      const scoreResult = scoreLead(lead);
 
       // Update with score
       await supabase.from('leads').update({
         score: scoreResult.total,
         status: scoreResult.classification === 'Hot' ? 'Hot' :
-                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold'
+                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', leadId);
+
+      const scoredLead = { ...lead, score: scoreResult.total, status: scoreResult.classification as any };
 
       // Handle Hot leads
       if (scoreResult.classification === 'Hot') {
-        await handleHotLead(lead as any);
+        await handleHotLead(scoredLead);
       }
 
       // Handle Cold leads - start drip
       if (scoreResult.classification === 'Cold') {
-        await startDripCampaign(lead as any);
+        await startDripCampaign(scoredLead);
       }
 
       // Sync to Google Sheets
-      await appendLeadToSheet({ ...lead, score: scoreResult.total } as any);
+      await appendLeadToSheet(scoredLead);
 
-      // Send initial WhatsApp message
-      const { sendInitialMessage } = await import('../src/whatsapp/engine');
-      await sendInitialMessage({ ...lead, score: scoreResult.total } as any);
+      // Send initial WhatsApp message (skip if DND)
+      if (!lead.isDND) {
+        await sendInitialMessage(scoredLead);
+      }
     }
 
     res.status(200).json({ success: true, leadId });
@@ -211,14 +255,29 @@ async function handleOptOutRequest(req: Request, res: Response): Promise<void> {
 }
 
 // Routes
-app.post('/webhook/99acres', (req, res) => handlePortalWebhook('99acres', req, res));
-app.post('/webhook/magicbricks', (req, res) => handlePortalWebhook('magicbricks', req, res));
-app.post('/webhook/housing', (req, res) => handlePortalWebhook('housing', req, res));
-app.post('/webhook/commonfloor', (req, res) => handlePortalWebhook('commonfloor', req, res));
+app.post('/webhook/99acres', (req: Request, res: Response) => handlePortalWebhook('99acres', req, res));
+app.post('/webhook/magicbricks', (req: Request, res: Response) => handlePortalWebhook('magicbricks', req, res));
+app.post('/webhook/housing', (req: Request, res: Response) => handlePortalWebhook('housing', req, res));
+app.post('/webhook/commonfloor', (req: Request, res: Response) => handlePortalWebhook('commonfloor', req, res));
 app.post('/webhook/whatsapp', handleWhatsAppInbound);
 app.get('/webhook/whatsapp', handleWhatsAppVerification);
 app.post('/opt-out', handleOptOutRequest);
-app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+app.get('/health', (_req: Request, res: Response) => res.json({
+  status: 'ok',
+  uptime: process.uptime(),
+  timestamp: new Date().toISOString(),
+}));
+
+// Metrics endpoint
+app.get('/metrics', async (_req: Request, res: Response) => {
+  try {
+    const { getRealTimeMetrics } = await import('../src/analytics/metrics');
+    const metrics = await getRealTimeMetrics();
+    res.json(metrics);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch metrics' });
+  }
+});
 
 // Start server
 const PORT = process.env.PORT || 3000;

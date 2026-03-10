@@ -1,13 +1,9 @@
 import { Lead } from '../utils/lead.model';
 import { sendWhatsAppMessage } from '../whatsapp/engine';
-import { createClient } from '@supabase/supabase-js';
+import { getSupabase } from '../utils/database';
+import { mapDbRowToLead } from '../utils/mappers';
 import { logger } from '../utils/logger';
 import cron from 'node-cron';
-
-const supabase = createClient(
-  process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY!
-);
 
 interface DripMessage {
   day: number;
@@ -19,28 +15,28 @@ const DRIP_SCHEDULE: DripMessage[] = [
   {
     day: 1,
     type: 'market_report',
-    message: 'Hi {name}, latest market update for {location}: prices moved {trend} this month. Reply to know more.'
+    message: 'Hi {name}, latest market update for {location}: prices moved {trend} this month. Reply to know more.',
   },
   {
     day: 3,
     type: 'new_listings',
-    message: 'Hi {name}, new {propertyType} listings in {location} matching your budget just added. Want details?'
+    message: 'Hi {name}, new {propertyType} listings in {location} matching your budget just added. Want details?',
   },
   {
     day: 7,
     type: 'price_trends',
-    message: 'Hi {name}, {area} price trend this week: {trend}. Good time to buy? Reply YES for full report.'
+    message: 'Hi {name}, {area} price trend this week: {trend}. Good time to buy? Reply YES for full report.',
   },
   {
     day: 14,
     type: 'buyer_guide',
-    message: "Hi {name}, first-time buyer? Here's a quick guide to buying in {city}. Want me to send it?"
+    message: "Hi {name}, first-time buyer? Here's a quick guide to buying in {city}. Want me to send it?",
   },
   {
     day: 30,
     type: 'requalification',
-    message: 'Hi {name}, still looking for {propertyType} in {location}? What is your current budget?'
-  }
+    message: 'Hi {name}, still looking for {propertyType} in {location}? What is your current budget?',
+  },
 ];
 
 /**
@@ -49,18 +45,27 @@ const DRIP_SCHEDULE: DripMessage[] = [
 export async function startDripCampaign(lead: Lead): Promise<void> {
   logger.info('Starting drip campaign', { leadId: lead.id });
 
-  for (const drip of DRIP_SCHEDULE) {
+  const supabase = getSupabase();
+
+  const rows = DRIP_SCHEDULE.map(drip => {
     const scheduleDate = new Date();
     scheduleDate.setDate(scheduleDate.getDate() + drip.day);
 
-    // Schedule in database
-    await supabase.from('scheduled_messages').insert({
+    return {
       lead_id: lead.id,
       scheduled_for: scheduleDate.toISOString(),
       message_type: drip.type,
       content: personalizeMessage(drip.message, lead),
-      status: 'pending'
-    });
+      status: 'pending',
+    };
+  });
+
+  const { error } = await supabase.from('scheduled_messages').insert(rows);
+
+  if (error) {
+    logger.error('Failed to schedule drip campaign', { error, leadId: lead.id });
+  } else {
+    logger.info('Drip campaign scheduled', { leadId: lead.id, count: rows.length });
   }
 }
 
@@ -72,12 +77,12 @@ function personalizeMessage(template: string, lead: Lead): string {
   const randomTrend = trends[Math.floor(Math.random() * trends.length)];
 
   return template
-    .replace('{name}', lead.name.split(' ')[0])
-    .replace('{location}', lead.locationPreference)
-    .replace('{area}', lead.locationPreference)
-    .replace('{city}', lead.locationPreference.split(',')[0] || lead.locationPreference)
-    .replace('{propertyType}', lead.propertyType.toLowerCase())
-    .replace('{trend}', randomTrend);
+    .replace(/{name}/g, lead.name.split(' ')[0])
+    .replace(/{location}/g, lead.locationPreference)
+    .replace(/{area}/g, lead.locationPreference)
+    .replace(/{city}/g, lead.locationPreference.split(',')[0] || lead.locationPreference)
+    .replace(/{propertyType}/g, lead.propertyType.toLowerCase())
+    .replace(/{trend}/g, randomTrend);
 }
 
 /**
@@ -85,6 +90,7 @@ function personalizeMessage(template: string, lead: Lead): string {
  * Runs daily via cron
  */
 export async function processScheduledMessages(): Promise<void> {
+  const supabase = getSupabase();
   const now = new Date().toISOString();
 
   const { data: messages, error } = await supabase
@@ -100,7 +106,7 @@ export async function processScheduledMessages(): Promise<void> {
 
   for (const message of messages) {
     try {
-      const lead = message.leads as Lead;
+      const lead = mapDbRowToLead(message.leads);
 
       // Skip if opted out
       if (lead.isOptedOut) {
@@ -134,41 +140,13 @@ export async function processScheduledMessages(): Promise<void> {
  * Initialize cron job for drip campaigns
  */
 export function initializeDripCron(): void {
-  // Run daily at 9 AM
-  cron.schedule('0 9 * * *', () => {
+  // Run every hour to process scheduled messages (more responsive than daily)
+  cron.schedule('0 * * * *', () => {
     logger.info('Running scheduled drip messages');
     processScheduledMessages().catch(error => {
       logger.error('Drip cron job failed', { error });
     });
   });
 
-  logger.info('Drip campaign cron initialized');
-}
-
-// Placeholder - actual implementation in engine.ts
-async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
-  const axios = (await import('axios')).default;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const token = process.env.WHATSAPP_API_TOKEN;
-
-  if (!phoneNumberId || !token) {
-    throw new Error('WhatsApp credentials not configured');
-  }
-
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-    {
-      messaging_product: 'whatsapp',
-      recipient_type: 'individual',
-      to: to,
-      type: 'text',
-      text: { body: message }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      }
-    }
-  );
+  logger.info('Drip campaign cron initialized (hourly)');
 }

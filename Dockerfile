@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install ALL dependencies (including devDependencies for TypeScript build)
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -23,10 +23,12 @@ WORKDIR /app
 # Install dumb-init for proper signal handling
 RUN apk add --no-cache dumb-init
 
+# Copy package files and install production deps only
+COPY package*.json ./
+RUN npm ci --omit=dev
+
 # Copy built application
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package*.json ./
 
 # Create logs directory
 RUN mkdir -p logs

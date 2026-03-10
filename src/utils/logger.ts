@@ -1,5 +1,11 @@
 import winston from 'winston';
 import path from 'path';
+import fs from 'fs';
+
+const logDir = '/tmp/logs';
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
 
 /**
  * Winston logger configuration
@@ -27,12 +33,12 @@ export const logger = winston.createLogger({
     }),
     // File output
     new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/system.log'),
+      filename: path.join(logDir, 'system.log'),
       maxsize: 5242880, // 5MB
       maxFiles: 5
     }),
     new winston.transports.File({
-      filename: path.join(__dirname, '../../logs/error.log'),
+      filename: path.join(logDir, 'error.log'),
       level: 'error',
       maxsize: 5242880,
       maxFiles: 5

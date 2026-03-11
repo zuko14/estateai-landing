@@ -7,14 +7,10 @@ import { logger } from '../utils/logger';
 import { getSupabase } from '../utils/database';
 import { mapDbRowToLead } from '../utils/mappers';
 import { withRetry } from '../utils/retry';
-import { updateLeadInSheet } from '../sheets/sheetsSync';
+import { appendLeadToSheet, updateLeadInSheet } from '../sheets/sheetsSync';
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v18.0';
 
-/**
- * Send WhatsApp message via Meta API
- * This is the SINGLE canonical implementation — import this everywhere.
- */
 export async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_API_TOKEN;
@@ -43,9 +39,6 @@ export async function sendWhatsAppMessage(to: string, message: string): Promise<
   }, `WhatsApp message to ${maskPhone(to)}`);
 }
 
-/**
- * Send initial qualification message within 2 minutes of lead capture
- */
 export async function sendInitialMessage(lead: Lead): Promise<void> {
   const message = `Hi ${lead.name}, thanks for your interest in ${lead.propertyType} at ${lead.locationPreference}.
 
@@ -61,9 +54,6 @@ Reply to get personalized recommendations!`;
   logger.info('Initial message sent', { leadId: lead.id, phone: maskPhone(lead.phone) });
 }
 
-/**
- * Process inbound reply from lead
- */
 export async function processInboundMessage(phone: string, message: string): Promise<void> {
   const supabase = getSupabase();
 
@@ -115,7 +105,11 @@ export async function processInboundMessage(phone: string, message: string): Pro
     await supabase.from('leads').update(updates).eq('id', lead.id);
 
     // Re-fetch lead for scoring
-    const { data: updatedRow } = await supabase.from('leads').select('*').eq('id', lead.id).single();
+    const { data: updatedRow } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('id', lead.id)
+      .single();
 
     if (updatedRow) {
       const updatedLead = mapDbRowToLead(updatedRow);
@@ -125,18 +119,17 @@ export async function processInboundMessage(phone: string, message: string): Pro
       await supabase.from('leads').update({
         score: scoreResult.total,
         status: scoreResult.classification === 'Hot' ? 'Hot' :
-                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
+          scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', lead.id);
 
       // Sync lead to Google Sheets
-      console.log('[WhatsApp Engine] Syncing updated lead to Google Sheets:', lead.id);
+      console.log('[WhatsApp Engine] Syncing lead to Google Sheets:', lead.id);
       try {
-        await updateLeadInSheet(updatedLead);
+        await appendLeadToSheet(updatedLead);
         console.log('[WhatsApp Engine] Sheets sync completed successfully');
-      } catch (error) {
-        console.error('[WhatsApp Engine] Sheets sync failed:', error);
-        logger.error('Failed to sync lead to sheets from WhatsApp engine', { leadId: lead.id, error });
-        // Continue processing - don't block the message flow on sheets failure
+      } catch (sheetsError) {
+        console.error('[WhatsApp Engine] Sheets sync failed:', sheetsError);
+        logger.error('Failed to sync lead to sheets', { leadId: lead.id, error: sheetsError });
       }
 
       // Handle Hot leads
@@ -144,7 +137,7 @@ export async function processInboundMessage(phone: string, message: string): Pro
         await handleHotLead(updatedLead);
       }
 
-      // Handle Cold leads - start drip campaign
+      // Handle Cold leads
       if (scoreResult.classification === 'Cold') {
         await scheduleFollowUps(lead.id);
       }
@@ -157,15 +150,10 @@ export async function processInboundMessage(phone: string, message: string): Pro
   }
 }
 
-/**
- * Schedule follow-up messages using the scheduled_messages table
- */
 export async function scheduleFollowUps(leadId: string): Promise<void> {
   const supabase = getSupabase();
 
-  // 4 hours no reply → send brochure reminder
   const brochureTime = new Date(Date.now() + 4 * 60 * 60 * 1000);
-  // 24 hours no reply → mark Cold + start drip
   const dripTime = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
   try {
@@ -186,19 +174,12 @@ export async function scheduleFollowUps(leadId: string): Promise<void> {
       },
     ]);
 
-    logger.info('Follow-ups scheduled', {
-      leadId,
-      brochureAt: brochureTime,
-      dripAt: dripTime,
-    });
+    logger.info('Follow-ups scheduled', { leadId, brochureAt: brochureTime, dripAt: dripTime });
   } catch (error) {
     logger.error('Failed to schedule follow-ups', { error, leadId });
   }
 }
 
-/**
- * Handle opt-out request
- */
 export async function handleOptOut(phone: string): Promise<void> {
   const supabase = getSupabase();
 
@@ -215,7 +196,6 @@ export async function handleOptOut(phone: string): Promise<void> {
       }).eq('id', lead.id);
     }
 
-    // Cancel any pending scheduled messages
     await supabase.from('scheduled_messages')
       .update({ status: 'cancelled' })
       .in('lead_id', leads.map(l => l.id))
@@ -225,9 +205,6 @@ export async function handleOptOut(phone: string): Promise<void> {
   }
 }
 
-/**
- * Check if message contains opt-out keywords
- */
 export function containsOptOut(message: string): boolean {
   const optOutKeywords = ['stop', 'unsubscribe', 'opt out', 'dont contact', "don't contact"];
   return optOutKeywords.some(keyword =>
@@ -235,9 +212,6 @@ export function containsOptOut(message: string): boolean {
   );
 }
 
-/**
- * Mask phone number for logging (compliance)
- */
 export function maskPhone(phone: string): string {
   if (phone.length < 8) return '****';
   return phone.slice(0, -8) + 'XXXX' + phone.slice(-4);

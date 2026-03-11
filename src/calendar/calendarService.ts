@@ -5,17 +5,54 @@ import dayjs from 'dayjs';
 let authInstance: any = null;
 
 /**
+ * Parse and validate service account credentials
+ */
+function parseServiceAccountCredentials(): any {
+  const jsonStr = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+
+  if (!jsonStr) {
+    console.error('[GoogleAuth] GOOGLE_SERVICE_ACCOUNT_JSON is not set');
+    throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON environment variable is required');
+  }
+
+  console.log('[GoogleAuth] Parsing GOOGLE_SERVICE_ACCOUNT_JSON...');
+
+  try {
+    const credentials = JSON.parse(jsonStr);
+
+    if (!credentials.client_email) {
+      throw new Error('Service account JSON missing client_email');
+    }
+    if (!credentials.private_key) {
+      throw new Error('Service account JSON missing private_key');
+    }
+
+    console.log('[GoogleAuth] Service account credentials parsed successfully');
+    console.log('[GoogleAuth] Service account email:', credentials.client_email);
+
+    return credentials;
+  } catch (error: any) {
+    console.error('[GoogleAuth] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:', error.message);
+    throw new Error(`Invalid GOOGLE_SERVICE_ACCOUNT_JSON: ${error.message}`);
+  }
+}
+
+/**
  * Get cached Google Auth instance
  */
 function getGoogleAuth() {
   if (!authInstance) {
+    console.log('[GoogleAuth] Initializing Google Auth...');
+    const credentials = parseServiceAccountCredentials();
+
     authInstance = new google.auth.GoogleAuth({
-      credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}'),
+      credentials,
       scopes: [
         'https://www.googleapis.com/auth/calendar',
         'https://www.googleapis.com/auth/spreadsheets',
       ],
     });
+    console.log('[GoogleAuth] Google Auth initialized successfully');
   }
   return authInstance;
 }

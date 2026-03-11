@@ -7,6 +7,7 @@ import { logger } from '../utils/logger';
 import { getSupabase } from '../utils/database';
 import { mapDbRowToLead } from '../utils/mappers';
 import { withRetry } from '../utils/retry';
+import { updateLeadInSheet } from '../sheets/sheetsSync';
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v18.0';
 
@@ -126,6 +127,17 @@ export async function processInboundMessage(phone: string, message: string): Pro
         status: scoreResult.classification === 'Hot' ? 'Hot' :
                 scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', lead.id);
+
+      // Sync lead to Google Sheets
+      console.log('[WhatsApp Engine] Syncing updated lead to Google Sheets:', lead.id);
+      try {
+        await updateLeadInSheet(updatedLead);
+        console.log('[WhatsApp Engine] Sheets sync completed successfully');
+      } catch (error) {
+        console.error('[WhatsApp Engine] Sheets sync failed:', error);
+        logger.error('Failed to sync lead to sheets from WhatsApp engine', { leadId: lead.id, error });
+        // Continue processing - don't block the message flow on sheets failure
+      }
 
       // Handle Hot leads
       if (scoreResult.classification === 'Hot') {

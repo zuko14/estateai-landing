@@ -170,7 +170,15 @@ async function handlePortalWebhook(
       }
 
       // Sync to Google Sheets
-      await appendLeadToSheet(scoredLead);
+      console.log('[Webhook] Syncing new lead to Google Sheets:', leadId);
+      try {
+        await appendLeadToSheet(scoredLead);
+        console.log('[Webhook] Sheets sync successful for lead:', leadId);
+      } catch (error) {
+        console.error('[Webhook] Sheets sync failed for lead:', leadId, error);
+        logger.error('Failed to sync lead to sheets from webhook', { leadId, error });
+        // Continue - don't fail the webhook just because sheets sync failed
+      }
 
       // Send initial WhatsApp message (skip if DND)
       if (!lead.isDND) {

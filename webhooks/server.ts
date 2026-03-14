@@ -21,13 +21,18 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const app = express();
+
+// Trust Render's proxy — must be set BEFORE rate limiter
+app.set('trust proxy', 1);
+
 app.use(express.json());
 
-// Rate limiting: 200 req/min supports 100+ leads/day comfortably
+// Rate limiting: 200 req/min supports 100+ leads/day
 const limiter = rateLimit({
   windowMs: 60000,
   max: 200,
   message: { error: 'Too many requests, please try again later' },
+  validate: { xForwardedForHeader: false },
 });
 app.use(limiter);
 
@@ -93,7 +98,6 @@ async function handlePortalWebhook(
     const isDND = await checkDNDRegistry(leadData.phone);
     if (isDND) {
       logger.info('Lead is on DND registry, skipping WhatsApp', { phone: leadData.phone });
-      // Still store the lead, but mark as DND
       leadData.isDND = true;
     }
 
@@ -110,13 +114,11 @@ async function handlePortalWebhook(
     let leadId: string;
 
     if (existingLeads && existingLeads.length > 0) {
-      // Merge duplicate lead
       const existing = mapDbRowToLead(existingLeads[0]);
       await mergeDuplicateLead(existing, leadData);
       leadId = existing.id;
       logger.info('Lead merged (duplicate)', { leadId });
     } else {
-      // Insert new lead
       const dbRow = mapLeadToDbRow(leadData);
       const { data: newLead, error } = await supabase
         .from('leads')
@@ -146,30 +148,24 @@ async function handlePortalWebhook(
 
     if (leadRow) {
       const lead = mapDbRowToLead(leadRow);
-
-      // Score the lead
       const scoreResult = scoreLead(lead);
 
-      // Update with score
       await supabase.from('leads').update({
         score: scoreResult.total,
         status: scoreResult.classification === 'Hot' ? 'Hot' :
-                scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
+          scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', leadId);
 
       const scoredLead = { ...lead, score: scoreResult.total, status: scoreResult.classification as any };
 
-      // Handle Hot leads
       if (scoreResult.classification === 'Hot') {
         await handleHotLead(scoredLead);
       }
 
-      // Handle Cold leads - start drip
       if (scoreResult.classification === 'Cold') {
         await startDripCampaign(scoredLead);
       }
 
-      // Sync to Google Sheets
       console.log('[Webhook] Syncing new lead to Google Sheets:', leadId);
       try {
         await appendLeadToSheet(scoredLead);
@@ -177,10 +173,8 @@ async function handlePortalWebhook(
       } catch (error) {
         console.error('[Webhook] Sheets sync failed for lead:', leadId, error);
         logger.error('Failed to sync lead to sheets from webhook', { leadId, error });
-        // Continue - don't fail the webhook just because sheets sync failed
       }
 
-      // Send initial WhatsApp message (skip if DND)
       if (!lead.isDND) {
         await sendInitialMessage(scoredLead);
       }
@@ -214,14 +208,12 @@ async function handleWhatsAppInbound(req: Request, res: Response): Promise<void>
 
     logger.info('WhatsApp message received', { phone: phone?.slice(-4), text: text.slice(0, 50) });
 
-    // Check for opt-out
     if (containsOptOut(text)) {
       await handleOptOut(phone);
       res.status(200).send('OK');
       return;
     }
 
-    // Process message
     await processInboundMessage(phone, text);
 
     res.status(200).send('OK');
@@ -291,8 +283,6 @@ app.get('/metrics', async (_req: Request, res: Response) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
-
-  // Initialize cron jobs
   initializeDripCron();
   initializeAnalyticsCron();
 });

@@ -25,6 +25,12 @@ const app = express();
 // Trust Render's proxy — must be set BEFORE rate limiter
 app.set('trust proxy', 1);
 
+// Always strip + from phone for consistent storage
+// Meta sends inbound as 919493386498 (no +) so we store without +
+function stripPhone(phone: string): string {
+  return phone.replace(/^\+/, '');
+}
+
 app.use(express.json());
 
 // Rate limiting: 200 req/min supports 100+ leads/day
@@ -86,6 +92,11 @@ async function handlePortalWebhook(
 
     // Normalize lead data
     const leadData = normalizeLead(source as LeadSource, req.body);
+
+    // Always strip + from phone for consistent storage
+    if (leadData.phone) {
+      leadData.phone = stripPhone(leadData.phone);
+    }
 
     // Validate phone number
     if (!leadData.phone || leadData.phone.length < 10) {
@@ -203,7 +214,7 @@ async function handleWhatsAppInbound(req: Request, res: Response): Promise<void>
     }
 
     const message = messages[0];
-    const phone = message.from;
+    const phone = stripPhone(message.from);
     const text = message.text?.body || '';
 
     logger.info('WhatsApp message received', { phone: phone?.slice(-4), text: text.slice(0, 50) });

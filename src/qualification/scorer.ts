@@ -12,13 +12,13 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
   let investmentIntent = 0;
   let urgencySignals = 0;
 
-  // Timeline scoring (using config weights)
+  // Timeline scoring
   switch (lead.timeline) {
-    case 'Immediate':    timeline = config.weights.timeline.immediate;   break;
-    case '1-3 months':  timeline = config.weights.timeline.shortTerm;   break;
-    case '3-6 months':  timeline = config.weights.timeline.mediumTerm;  break;
-    case '6+ months':   timeline = config.weights.timeline.longTerm;    break;
-    case 'Browsing':    timeline = config.weights.timeline.browsing;    break;
+    case 'Immediate': timeline = config.weights.timeline.immediate; break;
+    case '1-3 months': timeline = config.weights.timeline.shortTerm; break;
+    case '3-6 months': timeline = config.weights.timeline.mediumTerm; break;
+    case '6+ months': timeline = config.weights.timeline.longTerm; break;
+    case 'Browsing': timeline = config.weights.timeline.browsing; break;
   }
 
   // Budget clarity scoring
@@ -34,19 +34,25 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
 
   // Investment intent scoring
   switch (lead.investmentIntent) {
-    case 'Self-use':   investmentIntent = config.weights.intent.selfUse;     break;
-    case 'Investment': investmentIntent = config.weights.intent.investment;  break;
-    case 'Both':       investmentIntent = config.weights.intent.both;        break;
-    case 'Unclear':    investmentIntent = config.weights.intent.unclear;     break;
+    case 'Self-use': investmentIntent = config.weights.intent.selfUse; break;
+    case 'Investment': investmentIntent = config.weights.intent.investment; break;
+    case 'Both': investmentIntent = config.weights.intent.both; break;
+    case 'Unclear': investmentIntent = config.weights.intent.unclear; break; // 0 — no penalty
   }
 
-  // Urgency signals from tags
-  const urgencyTags = ['loan-approved', 'site-visited', 'ready-downpayment'];
-  const coldTags = ['first-inquiry', 'no-research'];
+  // Urgency signals — score per tag, capped at maxUrgencyScore
+  const urgencyTags = ['loan-approved', 'site-visited', 'ready-downpayment', 'urgent', 'immediate-buyer'];
+  const coldTags = ['first-inquiry', 'no-research', 'just-browsing'];
 
-  if (lead.tags.some(t => urgencyTags.includes(t))) {
-    urgencySignals = config.weights.urgency.positiveSignals;
-  } else if (lead.tags.some(t => coldTags.includes(t))) {
+  const matchedUrgency = (lead.tags || []).filter(t => urgencyTags.includes(t));
+  const matchedCold = (lead.tags || []).filter(t => coldTags.includes(t));
+
+  if (matchedUrgency.length > 0) {
+    urgencySignals = Math.min(
+      matchedUrgency.length * config.weights.urgency.positiveSignals,
+      config.weights.urgency.maxUrgencyScore
+    );
+  } else if (matchedCold.length > 0) {
     urgencySignals = config.weights.urgency.negativeSignals;
   }
 
@@ -58,7 +64,7 @@ export function scoreLead(lead: Lead): ScoreBreakdown {
   // Classify lead using config thresholds
   const classification: 'Hot' | 'Warm' | 'Cold' =
     total >= config.thresholds.hot ? 'Hot' :
-    total >= config.thresholds.warm ? 'Warm' : 'Cold';
+      total >= config.thresholds.warm ? 'Warm' : 'Cold';
 
   return {
     timeline,
@@ -81,6 +87,7 @@ export function getScoreFactors(breakdown: ScoreBreakdown): string {
   if (breakdown.budgetClarity < 0) factors.push(`Budget (${breakdown.budgetClarity})`);
   if (breakdown.investmentIntent > 0) factors.push(`Intent (+${breakdown.investmentIntent})`);
   if (breakdown.investmentIntent < 0) factors.push(`Intent (${breakdown.investmentIntent})`);
-  if (breakdown.urgencySignals !== 0) factors.push(`Urgency (${breakdown.urgencySignals > 0 ? '+' : ''}${breakdown.urgencySignals})`);
+  if (breakdown.urgencySignals > 0) factors.push(`Urgency (+${breakdown.urgencySignals})`);
+  if (breakdown.urgencySignals < 0) factors.push(`Urgency (${breakdown.urgencySignals})`);
   return factors.join(' | ');
 }

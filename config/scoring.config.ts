@@ -32,6 +32,7 @@ export interface ScoringConfig {
     urgency: {
       positiveSignals: number;
       negativeSignals: number;
+      maxUrgencyScore: number;
     };
   };
   response: {
@@ -58,18 +59,19 @@ export const defaultScoringConfig: ScoringConfig = {
     budget: {
       fullRange: 15,
       partialRange: 5,
-      none: -15,
+      none: -10,
       highValueBonus: 10
     },
     intent: {
       selfUse: 20,
       investment: 25,
       both: 25,
-      unclear: -20
+      unclear: 0      // no penalty for unclear — lead just hasn't said yet
     },
     urgency: {
-      positiveSignals: 20,
-      negativeSignals: -10
+      positiveSignals: 15,   // per tag
+      negativeSignals: -10,
+      maxUrgencyScore: 45    // cap so urgency alone can't exceed 45
     }
   },
   response: {

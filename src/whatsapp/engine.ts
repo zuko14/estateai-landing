@@ -131,10 +131,17 @@ export async function processInboundMessage(phone: string, message: string): Pro
           scoreResult.classification === 'Warm' ? 'Warm' : 'Cold',
       }).eq('id', lead.id);
 
+      // Build scored lead object with correct score — pass this everywhere
+      const scoredLead = {
+        ...updatedLead,
+        score: scoreResult.total,
+        status: scoreResult.classification as any,
+      };
+
       // Sync lead to Google Sheets
       console.log('[WhatsApp Engine] Syncing lead to Google Sheets:', lead.id);
       try {
-        await appendLeadToSheet(updatedLead);
+        await appendLeadToSheet(scoredLead);
         console.log('[WhatsApp Engine] Sheets sync completed successfully');
       } catch (sheetsError) {
         console.error('[WhatsApp Engine] Sheets sync failed:', sheetsError);
@@ -143,7 +150,7 @@ export async function processInboundMessage(phone: string, message: string): Pro
 
       // Handle Hot leads
       if (scoreResult.classification === 'Hot') {
-        await handleHotLead(updatedLead);
+        await handleHotLead(scoredLead);
       }
 
       // Handle Cold leads

@@ -11,6 +11,13 @@ import { appendLeadToSheet, updateLeadInSheet } from '../sheets/sheetsSync';
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v18.0';
 
+// Normalize phone to always strip + for storage lookups
+function normalizePhone(phone: string): string[] {
+  const stripped = phone.replace('+', '');
+  const withPlus = `+${stripped}`;
+  return [stripped, withPlus];
+}
+
 export async function sendWhatsAppMessage(to: string, message: string): Promise<void> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_API_TOKEN;
@@ -58,11 +65,13 @@ export async function processInboundMessage(phone: string, message: string): Pro
   const supabase = getSupabase();
 
   try {
-    // Find lead by phone
+    // Handle both +919493386498 and 919493386498 formats
+    const phoneVariants = normalizePhone(phone);
+
     const { data: leads, error } = await supabase
       .from('leads')
       .select('*')
-      .eq('phone', phone)
+      .in('phone', phoneVariants)
       .eq('is_opted_out', false)
       .order('created_at', { ascending: false })
       .limit(1);
@@ -183,10 +192,12 @@ export async function scheduleFollowUps(leadId: string): Promise<void> {
 export async function handleOptOut(phone: string): Promise<void> {
   const supabase = getSupabase();
 
+  const phoneVariants = normalizePhone(phone);
+
   const { data: leads } = await supabase
     .from('leads')
     .select('id')
-    .eq('phone', phone);
+    .in('phone', phoneVariants);
 
   if (leads && leads.length > 0) {
     for (const lead of leads) {
